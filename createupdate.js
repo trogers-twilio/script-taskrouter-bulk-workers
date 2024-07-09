@@ -16,6 +16,15 @@ const {
 
 const client = Twilio(ACCOUNT_SID, AUTH_TOKEN);
 
+const workerDetailsFile = process.argv.slice(2)[0];
+const workerSkillsFile = process.argv.slice(3)[0];
+
+const workerSkills = {}; // Object to store worker skills loaded from CSV
+let existingWorkers = []; // Array to store existing workers pulled from REST API
+const workersToLoad = []; // Array to store workers loaded from CSV
+const workersToCreate = []; // Array to store workers to create
+const workersToUpdate = []; // Array to store workers to update
+
 function isPrimitiveEqual(a, b) {
   // Considering anything falsy as equal
   return !a && !b ? true : a === b;
@@ -35,41 +44,62 @@ function generateContactUri(friendlyName) {
   return `client:${escapeNonAlphaChars(friendlyName)}`;
 }
 
-async function getExistingWorkers() {//Go get existing Workers
-  log.info('Fetching all existing workers');
-  client.taskrouter.workspaces(TR_WORKSPACE_SID)
+async function getExistingWorkers() { //Go get existing Workers
+  log.info('Fetching all existing workers from TaskRouter');
+  existingWorkers = await client.taskrouter.workspaces(TR_WORKSPACE_SID)
     .workers
-    .list({ pageSize: 1000 })
-    .then(workers => {
-      log.info('Workers fetched. Loading CSV');
-      loadCSV(workers)
-    });
+    .list({ pageSize: 1000 });
+  log.info(`Workers fetched. Count: ${existingWorkers.length}`);
 }
 
-function loadCSV(existingWorkers) { //Let's load the CSV
-  let workersToLoad = [];
-  fs.createReadStream(process.argv.slice(2)[0])
-    .pipe(csv())
-    .on('data', (data) => {
-      workersToLoad.push(data);
-    })
-    .on('end', () => {
-      sortWorkersToLoad(workersToLoad, existingWorkers);
-    });
+async function loadCSVs() { //Let's load the worker and skills CSVs
+  // Use a promise to ensure function doesn't return before CSVs are loaded
+  return new Promise((resolve, reject) => {
+    log.info(`Loading worker details from ${workerDetailsFile}...`);
+    fs.createReadStream(workerDetailsFile)
+      .pipe(csv())
+      .on('data', (data) => {
+        workersToLoad.push(data);
+      })
+      .on('end', () => {
+        log.info(`Worker details loaded. Count: ${workersToLoad.length}`);
+        // Load worker skills from CSV (if provided)
+        if (workerSkillsFile) {
+          log.info(`Loading worker skills from ${workerSkillsFile}...`);
+          fs.createReadStream(workerSkillsFile)
+          .pipe(csv())
+          .on('data', (data) => {
+            if (!workerSkills[data.email]) {
+              workerSkills[data.email] = {
+                skills: {},
+              };
+            }
+            Object.keys(data).forEach(skill => {
+              if (skill !== 'email' && data[skill]) {
+                if (data[skill] === 'x') {
+                  workerSkills[data.email].skills[skill] = null; // Set skill with no level
+                } else if (!isNaN(data[skill])) {
+                  workerSkills[data.email].skills[skill] = parseInt(data[skill]); // Set skill with level
+                }
+              }
+            });
+          })
+          .on('end', () => {
+            log.info(`Worker skills loaded. Count: ${Object.keys(workerSkills).length}`);
+            resolve();
+          });  
+        } else {
+          log.info('No worker skills file provided');
+          resolve();
+        } 
+      });
+  });
 }
 
-async function sortWorkersToLoad(workersToLoad, existingWorkers) {
+async function processWorkerChanges() {
   const existingWorkerNames = existingWorkers.map(w => w.friendlyName);
   
-  let workersToUpdate = [];
-  let workersToCreate = [];
-  // for (let i = 0; i < existingWorkers.length; i++) { //Build Array for existing Queue names
-  //   existingWorkerNames.push(Object.keys(existingWorkers[i])[0])
-  // }
-  
   for (let i = 0; i < workersToLoad.length; i++) { //Build Array for Worker names to load
-    //newQueueNames.push(workersToLoad[i].QueueFriendlyName)
-
     const workerFriendlyName = workersToLoad[i].friendlyName;
 
     if (existingWorkerNames.indexOf(workerFriendlyName) === -1) { //Check for new Worker
@@ -90,11 +120,12 @@ async function sortWorkersToLoad(workersToLoad, existingWorkers) {
   await updateWorkers(workersToUpdate, workersToLoad, existingWorkers);
 }
 
-async function createWorkers(workersToCreate, workersToLoad) {
+async function createWorkers() {
   const filteredWorkers = workersToLoad.filter(w => workersToCreate.includes(w.friendlyName));
 
   for (let i = 0; i < filteredWorkers.length; i++) {
     const worker = filteredWorkers[i];
+
     const {
       agent_attribute_1,
       date_joined,
@@ -105,7 +136,11 @@ async function createWorkers(workersToCreate, workersToLoad) {
       location,
       manager,
       team_id,
-      team_name
+      team_name,
+      department_id,
+      department_name,
+      extension,
+      configuredCallerId,
     } = worker;
 
     const dateJoined = isNaN(parseInt(date_joined))
@@ -126,8 +161,25 @@ async function createWorkers(workersToCreate, workersToLoad) {
       location,
       manager,
       team_id,
-      team_name
+      team_name,
+      department_id,
+      department_name,
+      extension,
+      configuredCallerId,
+      routing: {
+        skills: [],
+        levels: {}
+      }
     };
+
+    // Add skills to attributes if available
+    const skills = workerSkills[worker.email]?.skills;
+    if (skills) {
+      workerAttributes.routing.skills = Object.keys(skills);
+      workerAttributes.routing.levels = Object.fromEntries(
+        Object.entries(skills).filter(([_, level]) => level !== null)
+      );
+    }
 
     try {
       await client.taskrouter.workspaces(TR_WORKSPACE_SID)
@@ -152,7 +204,7 @@ async function createWorkers(workersToCreate, workersToLoad) {
   }
 }
 
-async function updateWorkers(workersToUpdate, workersToLoad, existingWorkers) {
+async function updateWorkers() {
   const filteredWorkers = workersToLoad.filter(w => {
     if (!workersToUpdate.includes(w.friendlyName)) {
       return false;
@@ -168,6 +220,32 @@ async function updateWorkers(workersToUpdate, workersToLoad, existingWorkers) {
       ? undefined
       : parseInt(w.date_left);
     
+    if (workerSkillsFile) {
+      // Get the workers existing skills
+      const existingSkills = existingAttributes.routing?.skills || [];
+      const existingLevels = existingAttributes.routing?.levels || {};
+
+      // Get the workers new skills
+      const newSkills = workerSkills[w.email]?.skills;
+      const newSkillKeys = newSkills ? Object.keys(newSkills) : [];
+      const newLevels = newSkills ? Object.fromEntries(
+        Object.entries(newSkills).filter(([_, level]) => level !== null)
+      ) : {};
+
+      // If the skills differ, the worker will be updated
+      if (existingSkills.length !== newSkillKeys.length) {
+        return true;
+      }
+      for (const skill of existingSkills) {
+        if (!newSkillKeys.includes(skill)) {
+          return true;
+        }
+        if (existingLevels[skill] !== newLevels[skill]) {
+          return true;
+        }
+      }
+    }
+
     // If any one of the CSV attributes differ from the matching worker attribute, the worker will be updated
     return (!isPrimitiveEqual(w.agent_attribute_1, existingAttributes.agent_attribute_1)
       || !isPrimitiveEqual(dateJoined, existingAttributes.date_joined)
@@ -178,6 +256,10 @@ async function updateWorkers(workersToUpdate, workersToLoad, existingWorkers) {
       || !isPrimitiveEqual(w.manager, existingAttributes.manager)
       || !isPrimitiveEqual(w.team_id, existingAttributes.team_id)
       || !isPrimitiveEqual(w.team_name, existingAttributes.team_name)
+      || !isPrimitiveEqual(w.department_id, existingAttributes.department_id)
+      || !isPrimitiveEqual(w.department_name, existingAttributes.department_name)
+      || !isPrimitiveEqual(w.extension, existingAttributes.extension)
+      || !isPrimitiveEqual(w.configuredCallerId, existingAttributes.configuredCallerId)
     );
   });
 
@@ -200,7 +282,11 @@ async function updateWorkers(workersToUpdate, workersToLoad, existingWorkers) {
       location,
       manager,
       team_id,
-      team_name
+      team_name,
+      department_id,
+      department_name,
+      extension,
+      configuredCallerId,
     } = worker;
 
     const dateJoined = isNaN(parseInt(date_joined))
@@ -223,12 +309,27 @@ async function updateWorkers(workersToUpdate, workersToLoad, existingWorkers) {
       location,
       manager,
       team_id,
-      team_name
+      team_name,
+      department_id,
+      department_name,
+      extension,
+      configuredCallerId,
     };
 
     const workerAttributes = {
-      ...existingAttributes
+      ...existingAttributes,
+      routing: {
+        ...existingAttributes.routing
+      }
     };
+
+    // Add skills to attributes if available
+    if (workerSkillsFile) {
+      workerAttributes.routing.skills = Object.keys(workerSkills[worker.email]?.skills || {});
+      workerAttributes.routing.levels = Object.fromEntries(
+          Object.entries(workerSkills[worker.email]?.skills || {}).filter(([_, level]) => level !== null)
+        );
+    }
 
     for (const key of Object.keys(updatedAttributes)) {
       if (updatedAttributes[key] !== undefined) {
@@ -248,8 +349,21 @@ async function updateWorkers(workersToUpdate, workersToLoad, existingWorkers) {
           attributes: JSON.stringify(workerAttributes)
         });
       log.info(`Updated worker ${friendlyName} with attributes ${JSON.stringify(workerAttributes)}`);
+    } catch (error) {
+      switch (error.code) {
+        case 20001:
+          log.error(`${friendlyName} exists. ${JSON.stringify(error)}`);
+          break;
+        case 20429:
+          log.error(`Error updating ${friendlyName}. Throttling, too many requests. ${JSON.stringify(error)}`);
+          break;
+        default:
+          log.error(`Error updating ${friendlyName}. ${JSON.stringify(error)}`);
+      }
+    }
 
-      if (dateLeft) {
+    if (dateLeft) {
+      try {
         // Assuming this is a worker that will not login to Flex again, and since an 
         // activity change is required for Flex Insights to receive the updated attributes,
         // performing that activity change here to ensure Flex Insights gets the updates
@@ -264,19 +378,17 @@ async function updateWorkers(workersToUpdate, workersToLoad, existingWorkers) {
             activitySid: OFFLINE_ACTIVITY_SID
           });
         log.info(`Flipped activity for terminated worker ${friendlyName}`);
-      }
-    } catch (error) {
-      switch (error.code) {
-        case 20001:
-          log.error(`${friendlyName} exists. ${JSON.stringify(error)}`);
-          break;
-        case 20429:
-          log.error(`Error updating ${friendlyName}. Throttling, too many requests. ${JSON.stringify(error)}`);
-          break;
-        default:
-          log.error(`Error updating ${friendlyName}. ${JSON.stringify(error)}`);
-      }
+      } catch (error) {
+        switch (error.code) {
+          case 20429:
+            log.error(`Error flipping activity for terminated worker ${friendlyName}. Throttling, too many requests. ${JSON.stringify(error)}`);
+            break;
+          default:
+            log.error(`Error flipping activity for terminated worker ${friendlyName}. ${JSON.stringify(error)}`);
+        }
+      } 
     }
+
   }
 }
 
@@ -286,7 +398,9 @@ async function runScript() {
     return;
   }
 
-  getExistingWorkers();
+  await getExistingWorkers();
+  await loadCSVs();
+  await processWorkerChanges();
 }
 
 // Starting script

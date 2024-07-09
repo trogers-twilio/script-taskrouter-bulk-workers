@@ -1,3 +1,0 @@
-friendlyName,full_name,email,location,manager,agent_attribute_1,date_joined,date_left,team_id,team_name
-john.doe@acme.corp,John Doe,john.doe@acme.corp,San Francisco,the.boss@acme.corp,Custom Value,1655121600000,,Support,Support
-jane.doe@acme.corp,Jane Doe,jane.doe@acme.corp,London,the.boss@acme.corp,Custom Value,1655121600000,,Sales,Sales

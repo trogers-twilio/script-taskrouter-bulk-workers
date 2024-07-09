@@ -1,0 +1,4 @@
+friendlyName,full_name,email,location,manager,date_joined,date_left,team_id,team_name,department_id,department_name,configuredCallerId,agent_attribute_1
+john.doe@acme.corp,John Doe,john.doe@acme.corp,San Francisco,the.boss@acme.corp,1719863598000,1720122798000,Support Team A,Support Team A,Support,Support,+18001234567,Custom Value
+jim.doe@acme.corp,Jim Doe,jim.doe@acme.corp,New York,the.boss@acme.corp,1719863598000,,Support Team B,Support Team B,Support,Support,+18009876543,Custom Value
+jane.doe@acme.corp,Jane Doe,jane.doe@acme.corp,London,the.boss@acme.corp,1719863598000,,Sales Team A,Sales Team A,Sales,Sales,+18881119876,Custom Value
